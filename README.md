@@ -58,7 +58,7 @@ OAuth tokens are essential and need to be generated for the initial run using a 
   * Click **View Client Secret** and copy both **Client Id** and **Client Secret** to previously opened webpage
   * Click **Generate OAuth Token** for Spotify
 * Close the Python script
-* Add the `Index.html` file to OBS as a **Browser Souce**
+* Add the `Index.html` file to OBS as a **Browser Source**
 
 ## Authors
 
