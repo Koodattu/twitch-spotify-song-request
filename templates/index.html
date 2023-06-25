@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Twitch Song Request OAuth Credentials Generator</title>
+    <script src="https://cdn.socket.io/socket.io-3.0.1.min.js"></script>
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+</head>
+<body>
+    <h1>Twitch Song Request Redeem Script Setup</h1>
+    <h2>Generate Twitch broadcaster account and bot account OAuth credentials</h2>
+    <a href="https://dev.twitch.tv/console" target="_blank">Twitch Developer Console</a>
+    <br>
+    <br>
+    <form method="POST" action="/">
+        <label for="twitch_client_id">Twitch Client ID:</label>
+        <input size="30" type="text" id="twitch_client_id" name="twitch_client_id" value="{{twitch_client_id}}" required>
+        <br><br>
+        <label for="twitch_client_secret">Twitch Client Secret:</label>
+        <input size="30" type="password" id="twitch_client_secret" name="twitch_client_secret" value="{{twitch_client_secret}}" required>
+        <br><br>
+        <label>For the account you're streaming on: </label>
+        <input type="submit" name="twitch_auth_gen_broadcaster" value="Generate Twitch OAuth Token">
+        <label>&nbsp;{{twitch_token_status_broadcaster_label}}</label>
+        <br><br>
+        <label>For the bot account that replies in chat:</label>
+        <input type="submit" name="twitch_auth_gen_bot" value="Generate Twitch OAuth Token">
+        <label>&nbsp;{{twitch_token_status_bot_label}}</label>
+    </form>
+
+    <br/>
+    <br/>
+
+    <h2>Create new channel points redeem reward</h2>
+    <form method="POST" action="/">
+        <label for="redeem_reward_name">Reward name:</label>
+        <input size="20" type="text" id="redeem_reward_name" name="redeem_reward_name" value="{{redeem_reward_name}}" required>
+        <input type="submit" name="twitch_create_reward" value="Create reward">
+        <label>&nbsp;{{twitch_create_reward_status_label}}</label>
+        <br>
+        <br>
+        <a href="https://dashboard.twitch.tv/u/vaarattu/viewer-rewards/channel-points/rewards" target="_blank">Edit Created Reward</a>
+    </form>
+
+    <h2>or</h2>
+
+    <h2>Get custom channel reward id created by yourself if using only bot account</h2>
+    <form method="POST" action="/">
+        <label for="twitch_channel_name">Twitch channel name:</label>
+        <input size="20" type="text" id="twitch_channel_name" name="twitch_channel_name" value="{{twitch_channel_name}}" required>
+        <input type="submit" name="twitch_chat_listen" value="Listen to channel's Twitch chat">
+        <label id="twitch_chat_listen_status_label">{{chat_listen_status_label}}</label>
+        <br>
+        <br>
+        <label for="twitch_channel_redeem">Latest channel redeem id with required user input:</label>
+        <input size="35" type="text" id="twitch_channel_redeem" name="twitch_channel_redeem">
+        <label id="twitch_redeemed_by_label"></label>
+        <input style="display: none;" type="submit" id="save_channel_redeem_id" name="save_channel_redeem_id" value="Use this channel redeem id">
+    </form>
+
+    <br/>
+    <br/>
+    
+    <h2>Generate Spotify OAuth token</h2>
+    <a href="https://developer.spotify.com/dashboard" target="_blank">Spotify Developer Console</a>
+    <br>
+    <br>
+    <form method="POST" action="/">
+        <label for="spotify_client_id">Spotify Client ID:</label>
+        <input size="30" type="text" id="spotify_client_id" name="spotify_client_id" value="{{spotify_client_id}}" required>
+        <br><br>
+        <label for="spotify_client_secret">Spotify Client Secret:</label>
+        <input size="30" type="password" id="spotify_client_secret" name="spotify_client_secret" value="{{spotify_client_secret}}" required>
+        <br><br>
+        <input type="submit" name="spotify_auth_gen" value="Generate Spotify OAuth Token">
+        <label name="token_status">&nbsp;{{spotify_token_status_label}}</label>
+    </form>
+
+    <script type="text/javascript">
+        var socket = io.connect('http://localhost:5000');
+        
+        socket.on('connect', function() {
+          console.log('Connected to server');
+        });
+        
+        socket.on('channel_redeem', function(data) {
+            document.getElementById('twitch_channel_redeem').value=data.reward_id;
+            document.getElementById("save_channel_redeem_id").style.display = "inline"
+        });
+        
+        socket.on('chat_listening', function(data) {
+            document.getElementById("twitch_chat_listen_status_label").textContent  = data.message;
+        });
+        
+        socket.on('redeemed_by', function(data) {
+            document.getElementById("twitch_redeemed_by_label").textContent = "Redeemed by: " + data.display_name;
+        });
+      </script>
+
+</body>
+</html>
