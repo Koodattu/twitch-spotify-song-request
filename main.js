@@ -322,7 +322,7 @@ function connectChatBot() {
       customRewardIdIndex = split.findIndex((item) => item.startsWith("custom-reward-id="));
       redeemId = split[customRewardIdIndex].split("=")[1];
       if (redeemId === twitchChannelRedeemId) {
-        chatMessageTextIndex = split.findIndex((item) => item.startsWith("user-type="));
+        chatMessageTextIndex = split.findIndex((item) => item.includes("PRIVMSG"));
         chatMessageTextSplit = split[chatMessageTextIndex].split(":");
         chatMessageText = chatMessageTextSplit[chatMessageTextSplit.length - 1];
         var response = await parseSongRequest(chatMessageText);
