@@ -235,7 +235,12 @@ async function spotifyTrack(songUri) {
     return response.json();
   });
   console.log(data);
-  var queueResult = await spotifyAddToQueue("spotify:track:" + songUri);
+  var deviceId = await getFirstComputerDeviceId();
+  if (deviceId === null) {
+    await refundChannelPoints();
+    return "No computer devices available. Channel points have been refunded.";
+  }
+  var queueResult = await spotifyAddToQueue("spotify:track:" + songUri, deviceId);
   if (queueResult) {
     var songName = data["name"];
 	var artistName = data.artists.map(artist => artist.name);
@@ -261,8 +266,11 @@ async function spotifySearch(searchTerm) {
   return uri.split(":")[2];
 }
 
-async function spotifyAddToQueue(songUri) {
+async function spotifyAddToQueue(songUri, deviceId = null) {
   var url = "https://api.spotify.com/v1/me/player/queue?uri=" + songUri;
+  if (deviceId !== null) {
+    url += "&device_id=" + deviceId;
+  }
   var result = await fetch(url, {
     method: "POST",
     headers: { Authorization: "Bearer " + getSpotifyAccessToken(true) },
@@ -270,6 +278,24 @@ async function spotifyAddToQueue(songUri) {
     return response.status === 204;
   });
   return result;
+}
+
+async function getFirstComputerDeviceId() {
+  var url = "https://api.spotify.com/v1/me/player/devices";
+  const data = await fetch(url, {
+    headers: { Authorization: "Bearer " + getSpotifyAccessToken(true) },
+  }).then(function (response) {
+    return response.json();
+  });
+  console.log(data);
+
+  for (var i = 0; i < data.devices.length; i++) {
+    if (data.devices[i].type === "Computer") {
+      return data.devices[i].id;
+    }
+  }
+
+  return null;
 }
 
 async function refundChannelPoints() {
