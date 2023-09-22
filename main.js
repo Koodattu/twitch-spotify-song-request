@@ -252,6 +252,7 @@ async function spotifyTrack(songUri) {
 }
 
 async function spotifySearch(searchTerm) {
+  searchTerm = encodeURIComponent(searchTerm);
   var url = "https://api.spotify.com/v1/search?q=" + searchTerm + "&type=track&market=FI&limit=1";
   const data = await fetch(url, {
     headers: { Authorization: "Bearer " + getSpotifyAccessToken(true) },
