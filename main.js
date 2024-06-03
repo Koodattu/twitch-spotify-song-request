@@ -198,6 +198,12 @@ async function refreshSpotifyToken() {
 }
 
 async function parseSongRequest(text) {
+  // check if request contains youtube link like youtube.com or youtu.be
+  if (text.includes("youtube.com") || text.includes("youtu.be")) {
+    await refundChannelPoints();
+    return "YouTube links are not supported. Please use Spotify links or search for a song by name.";
+  }
+
   var status = await validateSpotifyAuth(getSpotifyAccessToken(true));
   if (!status) {
     await checkSpotifyAuth();
@@ -243,8 +249,8 @@ async function spotifyTrack(songUri) {
   var queueResult = await spotifyAddToQueue("spotify:track:" + songUri, deviceId);
   if (queueResult) {
     var songName = data["name"];
-	var artistName = data.artists.map(artist => artist.name);
-    return 'The song "' + songName + '" by "' + artistName.join(', ') + '" was added to the queue.';
+    var artistName = data.artists.map((artist) => artist.name);
+    return 'The song "' + songName + '" by "' + artistName.join(", ") + '" was added to the queue.';
   } else {
     await refundChannelPoints();
     return "Spotify returned error. Channel points have been refunded.";
@@ -359,7 +365,7 @@ function connectChatBot() {
   };
 
   wsChatBot.onclose = async function () {
-	await checkTwitchAuth(false);
+    await checkTwitchAuth(false);
     console.log("wsChatBot Socket Closed");
     setTimeout(connectChatBot, reconnectInterval);
   };
@@ -442,7 +448,7 @@ async function connectChannelPoints() {
   };
 
   wsChannelPoints.onclose = async function () {
-	await checkTwitchAuth(true);
+    await checkTwitchAuth(true);
     console.log("wsChannelPoints Socket Closed");
     clearInterval(heartbeatHandle);
     setTimeout(connectChannelPoints, reconnectInterval);
