@@ -282,7 +282,7 @@ async function spotifyAddToQueue(songUri, deviceId = null) {
     method: "POST",
     headers: { Authorization: "Bearer " + getSpotifyAccessToken(true) },
   }).then(function (response) {
-    return response.status === 204;
+    return response.status === 200;
   });
   return result;
 }
