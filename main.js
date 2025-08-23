@@ -306,13 +306,7 @@ async function getFirstComputerDeviceId() {
 }
 
 async function refundChannelPoints() {
-  var url =
-    "https://api.twitch.tv/helix/channel_points/custom_rewards/redemptions?id=" +
-    latestRedeem +
-    "&broadcaster_id=" +
-    twitchBroadcasterId +
-    "&reward_id=" +
-    redemptionId;
+  var url = "https://api.twitch.tv/helix/channel_points/custom_rewards/redemptions?id=" + latestRedeem + "&broadcaster_id=" + twitchBroadcasterId + "&reward_id=" + redemptionId;
   const data = await fetch(url, {
     method: "PATCH",
     headers: {
@@ -331,7 +325,7 @@ async function refundChannelPoints() {
 function connectChatBot() {
   var reconnectInterval = 1000 * 3;
 
-  wsChatBot = new WebSocket("ws://irc-ws.chat.twitch.tv:80");
+  wsChatBot = new WebSocket("wss://irc-ws.chat.twitch.tv:443");
 
   wsChatBot.onopen = function (event) {
     console.log(event);
@@ -459,7 +453,7 @@ async function start() {
   await checkTwitchAuth(true);
   await checkTwitchAuth(false);
   await checkSpotifyAuth();
-  connectChannelPoints();
+  //connectChannelPoints();
   connectChatBot();
 }
 
