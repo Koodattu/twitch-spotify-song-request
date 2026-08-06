@@ -53,7 +53,7 @@ OAuth tokens are essential and need to be generated for the initial run using a 
   * You can modify the channel point reward on your [Twitch Dashboard](https://dashboard.twitch.tv/u/vaarattu/viewer-rewards/channel-points/rewards)
 * Create a new Spotify app on the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
   * App name and description can be whatever
-  * Set website and Redirect URI to `http://localhost:5000/spotify/callback`
+  * Set website and Redirect URI to `http://127.0.0.1:5000/spotify/callback`
   * Click create and click on **Settings**
   * Click **View Client Secret** and copy both **Client Id** and **Client Secret** to previously opened webpage
   * Click **Generate OAuth Token** for Spotify

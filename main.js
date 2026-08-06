@@ -3,6 +3,19 @@ var wsChatBot;
 
 var latestRedeem;
 var redemptionId;
+var pendingSongChoices = new Map();
+var recentRedemptions = [];
+var skipVoteState = null;
+
+var SPOTIFY_SEARCH_RESULT_LIMIT = 5;
+var SPOTIFY_CHOICE_RESULT_LIMIT = 3;
+var SPOTIFY_CONFIDENCE_THRESHOLD = 0.74;
+var SPOTIFY_CLEAR_WIN_MARGIN = 0.08;
+var SONG_CHOICE_TIMEOUT_MS = 1000 * 45;
+var REQUIRED_SKIP_VOTES = 5;
+var SKIP_TIMEOUT_MS = 1000 * 30;
+var REDEMPTION_MATCH_TIMEOUT_MS = 1000 * 3;
+var REDEMPTION_MATCH_INTERVAL_MS = 100;
 
 function getTwitchBroadcasterAccessToken(localStorage) {
   if (localStorage) {
@@ -197,21 +210,118 @@ async function refreshSpotifyToken() {
   return succesful;
 }
 
-async function parseSongRequest(text) {
-  // check if request contains youtube link like youtube.com or youtu.be
-  if (text.includes("youtube.com") || text.includes("youtu.be")) {
-    await refundChannelPoints();
-    return "YouTube links are not supported. Please use Spotify links or search for a song by name.";
+function getChatChannel() {
+  return "#" + twitchBroadcasterName.toLowerCase();
+}
+
+function twitchSafeText(text) {
+  return String(text).replace(/[\r\n]+/g, " ").trim();
+}
+
+function shortenText(text, maxLength) {
+  text = twitchSafeText(text);
+  if (text.length <= maxLength) {
+    return text;
+  }
+  return text.substring(0, maxLength - 3).trim() + "...";
+}
+
+function sendChatMessage(text, replyParentMsgId = null) {
+  if (!wsChatBot || wsChatBot.readyState !== WebSocket.OPEN) {
+    console.log("Unable to send chat message because chat socket is not open.");
+    return;
+  }
+  var replyPrefix = replyParentMsgId ? "@reply-parent-msg-id=" + replyParentMsgId + " " : "";
+  wsChatBot.send(replyPrefix + "PRIVMSG " + getChatChannel() + " :" + shortenText(text, 450));
+}
+
+function unescapeTwitchTagValue(value) {
+  return value.replace(/\\s/g, " ").replace(/\\:/g, ";").replace(/\\r/g, "\r").replace(/\\n/g, "\n").replace(/\\\\/g, "\\");
+}
+
+function parseTwitchPrivmsg(rawMessage) {
+  if (!rawMessage.includes(" PRIVMSG ")) {
+    return null;
   }
 
+  var tags = {};
+  var messageStartIndex = 0;
+  if (rawMessage.startsWith("@")) {
+    var tagEndIndex = rawMessage.indexOf(" ");
+    var tagText = rawMessage.substring(1, tagEndIndex);
+    var tagParts = tagText.split(";");
+    for (var i = 0; i < tagParts.length; i++) {
+      var tagSplit = tagParts[i].split("=");
+      tags[tagSplit[0]] = unescapeTwitchTagValue(tagSplit.slice(1).join("="));
+    }
+    messageStartIndex = tagEndIndex + 1;
+  }
+
+  var login = "";
+  if (rawMessage.charAt(messageStartIndex) === ":") {
+    var prefixEndIndex = rawMessage.indexOf(" ", messageStartIndex);
+    var prefix = rawMessage.substring(messageStartIndex + 1, prefixEndIndex);
+    login = prefix.split("!")[0];
+  }
+
+  var textStartIndex = rawMessage.indexOf(" :", rawMessage.indexOf(" PRIVMSG "));
+  var text = textStartIndex === -1 ? "" : rawMessage.substring(textStartIndex + 2);
+
+  return {
+    raw: rawMessage,
+    tags: tags,
+    messageId: tags["id"] || "",
+    customRewardId: tags["custom-reward-id"] || "",
+    userId: tags["user-id"] || "",
+    displayName: tags["display-name"] || login,
+    login: login,
+    text: text,
+  };
+}
+
+function getUserKey(chatMessage) {
+  if (chatMessage.userId) {
+    return chatMessage.userId;
+  }
+  if (chatMessage.login) {
+    return chatMessage.login.toLowerCase();
+  }
+  return chatMessage.displayName.toLowerCase();
+}
+
+function isReplyToBot(chatMessage) {
+  var parentUserId = chatMessage.tags["reply-parent-user-id"] || "";
+  var parentDisplayName = chatMessage.tags["reply-parent-display-name"] || "";
+  return parentUserId === twitchBotId || parentDisplayName.toLowerCase() === twitchBotName.toLowerCase();
+}
+
+async function ensureSpotifyAuth() {
   var status = await validateSpotifyAuth(getSpotifyAccessToken(true));
   if (!status) {
     await checkSpotifyAuth();
-    var status = await validateSpotifyAuth(getSpotifyAccessToken(true));
-    if (!status) {
-      await refundChannelPoints();
-      return "Unable to connect to Spotify. Channel points have been refunded (or not).";
-    }
+    status = await validateSpotifyAuth(getSpotifyAccessToken(true));
+  }
+  return status;
+}
+
+function refundStatusText(refunded) {
+  if (refunded) {
+    return "Channel points have been refunded.";
+  }
+  return "I could not refund channel points automatically.";
+}
+
+async function parseSongRequest(text, requestContext) {
+  // check if request contains youtube link like youtube.com or youtu.be
+  if (text.includes("youtube.com") || text.includes("youtu.be")) {
+    var refundedYoutube = await refundChannelPoints(requestContext);
+    return "YouTube links are not supported. Please use Spotify links or search for a song by name. " + refundStatusText(refundedYoutube);
+  }
+
+  var status = await ensureSpotifyAuth();
+  if (!status) {
+    var refundedAuth = await refundChannelPoints(requestContext);
+    return "Unable to connect to Spotify. " + refundStatusText(refundedAuth);
   }
 
   let uri = "";
@@ -220,20 +330,26 @@ async function parseSongRequest(text) {
     uri = text.split("track/")[1];
     uri = uri.split("?")[0];
   } else if (text.includes("spotify:track:")) {
-    uri = uri.split(":")[2];
+    uri = text.split("spotify:track:")[1].split(" ")[0];
   } else {
-    uri = await spotifySearch(text);
+    var searchResult = await spotifySearch(text);
+    if (searchResult.uri !== "") {
+      uri = searchResult.uri;
+    } else if (searchResult.choices.length > 0) {
+      await createPendingSongChoice(requestContext, searchResult.choices);
+      return formatSongChoiceMessage(searchResult.choices);
+    }
   }
 
   if (uri === "") {
-    await refundChannelPoints();
-    return 'No songs were found for "' + text + '". Channel points have been refunded.';
+    var refundedSearch = await refundChannelPoints(requestContext);
+    return 'No songs were found for "' + text + '". ' + refundStatusText(refundedSearch);
   } else {
-    return spotifyTrack(uri);
+    return spotifyTrack(uri, requestContext);
   }
 }
 
-async function spotifyTrack(songUri) {
+async function spotifyTrack(songUri, requestContext) {
   var url = "https://api.spotify.com/v1/tracks/" + songUri + "?market=FI";
   const data = await fetch(url, {
     headers: { Authorization: "Bearer " + getSpotifyAccessToken(true) },
@@ -243,8 +359,8 @@ async function spotifyTrack(songUri) {
   console.log(data);
   var deviceId = await getFirstComputerDeviceId();
   if (deviceId === null) {
-    await refundChannelPoints();
-    return "No computer devices available. Channel points have been refunded.";
+    var refundedDevice = await refundChannelPoints(requestContext);
+    return "No computer devices available. " + refundStatusText(refundedDevice);
   }
   var queueResult = await spotifyAddToQueue("spotify:track:" + songUri, deviceId);
   if (queueResult) {
@@ -252,14 +368,13 @@ async function spotifyTrack(songUri) {
     var artistName = data.artists.map((artist) => artist.name);
     return 'The song "' + songName + '" by "' + artistName.join(", ") + '" was added to the queue.';
   } else {
-    await refundChannelPoints();
-    return "Spotify returned error. Channel points have been refunded.";
+    var refundedQueue = await refundChannelPoints(requestContext);
+    return "Spotify returned error. " + refundStatusText(refundedQueue);
   }
 }
 
 async function spotifySearch(searchTerm) {
-  searchTerm = encodeURIComponent(searchTerm);
-  var url = "https://api.spotify.com/v1/search?q=" + searchTerm + "&type=track&market=FI&limit=1";
+  var url = "https://api.spotify.com/v1/search?q=" + encodeURIComponent(searchTerm) + "&type=track&market=FI&limit=" + SPOTIFY_SEARCH_RESULT_LIMIT;
   const data = await fetch(url, {
     headers: { Authorization: "Bearer " + getSpotifyAccessToken(true) },
   }).then(function (response) {
@@ -267,10 +382,224 @@ async function spotifySearch(searchTerm) {
   });
   console.log(data);
   if (data["tracks"]["total"] == 0) {
-    return "";
+    return { uri: "", choices: [] };
   }
-  var uri = data["tracks"]["items"]["0"]["uri"];
-  return uri.split(":")[2];
+
+  var candidates = data["tracks"]["items"].map(function (track, index) {
+    return {
+      id: track.id || track.uri.split(":")[2],
+      name: track.name,
+      artists: track.artists.map((artist) => artist.name),
+      score: calculateSpotifyMatchScore(searchTerm, track, index),
+    };
+  });
+  candidates.sort(function (a, b) {
+    return b.score - a.score;
+  });
+
+  var best = candidates[0];
+  var secondScore = candidates.length > 1 ? candidates[1].score : 0;
+  var isConfident = best.score >= SPOTIFY_CONFIDENCE_THRESHOLD && best.score - secondScore >= SPOTIFY_CLEAR_WIN_MARGIN;
+  if (best.score >= 0.9) {
+    isConfident = true;
+  }
+
+  if (isConfident) {
+    return { uri: best.id, choices: [] };
+  }
+
+  return { uri: "", choices: candidates.slice(0, SPOTIFY_CHOICE_RESULT_LIMIT) };
+}
+
+function normalizeSearchText(text) {
+  return String(text)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function getTokens(text) {
+  var normalized = normalizeSearchText(text);
+  if (normalized === "") {
+    return [];
+  }
+  return normalized.split(/\s+/);
+}
+
+function tokenOverlapScore(queryText, candidateText) {
+  var queryTokens = getTokens(queryText);
+  var candidateTokens = getTokens(candidateText);
+  if (queryTokens.length === 0 || candidateTokens.length === 0) {
+    return 0;
+  }
+  var candidateTokenSet = new Set(candidateTokens);
+  var matches = 0;
+  for (var i = 0; i < queryTokens.length; i++) {
+    if (candidateTokenSet.has(queryTokens[i])) {
+      matches++;
+    }
+  }
+  return matches / queryTokens.length;
+}
+
+function levenshteinDistance(a, b) {
+  if (a.length === 0) {
+    return b.length;
+  }
+  if (b.length === 0) {
+    return a.length;
+  }
+
+  var previousRow = [];
+  for (var i = 0; i <= b.length; i++) {
+    previousRow[i] = i;
+  }
+
+  for (var aIndex = 0; aIndex < a.length; aIndex++) {
+    var currentRow = [aIndex + 1];
+    for (var bIndex = 0; bIndex < b.length; bIndex++) {
+      var insertCost = currentRow[bIndex] + 1;
+      var deleteCost = previousRow[bIndex + 1] + 1;
+      var replaceCost = previousRow[bIndex] + (a[aIndex] === b[bIndex] ? 0 : 1);
+      currentRow[bIndex + 1] = Math.min(insertCost, deleteCost, replaceCost);
+    }
+    previousRow = currentRow;
+  }
+
+  return previousRow[b.length];
+}
+
+function stringSimilarity(a, b) {
+  a = normalizeSearchText(a);
+  b = normalizeSearchText(b);
+  if (a === "" || b === "") {
+    return 0;
+  }
+  if (a === b) {
+    return 1;
+  }
+  if (a.includes(b) || b.includes(a)) {
+    return 0.88;
+  }
+  var maxLength = Math.max(a.length, b.length);
+  return 1 - levenshteinDistance(a, b) / maxLength;
+}
+
+function calculateSpotifyMatchScore(searchTerm, track, index) {
+  var artistNames = track.artists.map((artist) => artist.name);
+  var trackName = track.name;
+  var fullName = trackName + " " + artistNames.join(" ");
+  var queryTokens = getTokens(searchTerm);
+  var artistTokens = getTokens(artistNames.join(" "));
+  var artistTokenSet = new Set(artistTokens);
+  var artistMentioned = queryTokens.some(function (token) {
+    return artistTokenSet.has(token);
+  });
+
+  var nameScore = stringSimilarity(searchTerm, trackName);
+  var fullScore = stringSimilarity(searchTerm, fullName);
+  var overlapScore = tokenOverlapScore(searchTerm, fullName);
+  var rankPenalty = index * 0.01;
+  var score = Math.max(nameScore, fullScore) * 0.55 + overlapScore * 0.35 + (artistMentioned ? 0.1 : 0) - rankPenalty;
+  return Math.max(0, Math.min(1, score));
+}
+
+function formatSongChoiceMessage(choices) {
+  var choiceText = choices.map(function (choice, index) {
+    return index + 1 + ") " + shortenText(choice.name, 34) + " - " + shortenText(choice.artists[0] || "Unknown", 20);
+  });
+  return "Not sure which song you meant. Type !pick 1-" + choices.length + ": " + choiceText.join(" | ");
+}
+
+async function createPendingSongChoice(requestContext, choices) {
+  var userKey = requestContext.userKey;
+  var existingChoice = pendingSongChoices.get(userKey);
+  if (existingChoice) {
+    clearTimeout(existingChoice.timeoutHandle);
+    await refundChannelPoints(existingChoice.requestContext);
+  }
+  var timeoutHandle = setTimeout(async function () {
+    pendingSongChoices.delete(userKey);
+    await refundChannelPoints(requestContext);
+  }, SONG_CHOICE_TIMEOUT_MS);
+  pendingSongChoices.set(userKey, {
+    choices: choices,
+    requestContext: requestContext,
+    timeoutHandle: timeoutHandle,
+  });
+}
+
+function findPendingSongChoice(chatMessage) {
+  var userKey = getUserKey(chatMessage);
+  var pendingChoice = pendingSongChoices.get(userKey);
+  if (pendingChoice) {
+    return { userKey: userKey, pendingChoice: pendingChoice };
+  }
+
+  var displayNameKey = chatMessage.displayName.toLowerCase();
+  var loginKey = chatMessage.login.toLowerCase();
+  var entries = pendingSongChoices.entries();
+  for (var entry = entries.next(); !entry.done; entry = entries.next()) {
+    var pendingRequestContext = entry.value[1].requestContext;
+    if (displayNameKey && pendingRequestContext.displayName && pendingRequestContext.displayName.toLowerCase() === displayNameKey) {
+      return { userKey: entry.value[0], pendingChoice: entry.value[1] };
+    }
+    if (loginKey && pendingRequestContext.login && pendingRequestContext.login.toLowerCase() === loginKey) {
+      return { userKey: entry.value[0], pendingChoice: entry.value[1] };
+    }
+  }
+
+  return null;
+}
+
+function getSongChoiceNumber(text) {
+  var choiceText = text.trim();
+  var botMention = "@" + twitchBotName.toLowerCase();
+  if (choiceText.toLowerCase().startsWith(botMention)) {
+    choiceText = choiceText.substring(botMention.length).trim();
+  }
+  if (choiceText.toLowerCase().startsWith("!pick")) {
+    choiceText = choiceText.substring("!pick".length).trim();
+  }
+
+  var choiceMatch = choiceText.match(/^([1-9])(?:[\).\s-]|$)/);
+  if (!choiceMatch) {
+    return null;
+  }
+  return parseInt(choiceMatch[1], 10);
+}
+
+async function handlePendingSongChoice(chatMessage) {
+  var pendingChoiceEntry = findPendingSongChoice(chatMessage);
+  if (!pendingChoiceEntry) {
+    return false;
+  }
+  var pendingChoice = pendingChoiceEntry.pendingChoice;
+
+  var choiceNumber = getSongChoiceNumber(chatMessage.text);
+  if (choiceNumber === null) {
+    return false;
+  }
+
+  if (!isReplyToBot(chatMessage)) {
+    console.log("Accepted song choice from the pending requester without Twitch reply-parent bot tags.");
+  }
+
+  var choiceIndex = choiceNumber - 1;
+  if (Number.isNaN(choiceIndex) || choiceIndex < 0 || choiceIndex >= pendingChoice.choices.length) {
+    return false;
+  }
+
+  clearTimeout(pendingChoice.timeoutHandle);
+  pendingSongChoices.delete(pendingChoiceEntry.userKey);
+
+  var choice = pendingChoice.choices[choiceIndex];
+  var response = await spotifyTrack(choice.id, pendingChoice.requestContext);
+  sendChatMessage(response, chatMessage.messageId);
+  return true;
 }
 
 async function spotifyAddToQueue(songUri, deviceId = null) {
@@ -283,6 +612,21 @@ async function spotifyAddToQueue(songUri, deviceId = null) {
     headers: { Authorization: "Bearer " + getSpotifyAccessToken(true) },
   }).then(function (response) {
     return response.status === 200;
+  });
+  return result;
+}
+
+async function spotifySkipToNext() {
+  var status = await ensureSpotifyAuth();
+  if (!status) {
+    return false;
+  }
+
+  var result = await fetch("https://api.spotify.com/v1/me/player/next", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + getSpotifyAccessToken(true) },
+  }).then(function (response) {
+    return response.status === 204 || response.status === 200;
   });
   return result;
 }
@@ -305,8 +649,15 @@ async function getFirstComputerDeviceId() {
   return null;
 }
 
-async function refundChannelPoints() {
-  var url = "https://api.twitch.tv/helix/channel_points/custom_rewards/redemptions?id=" + latestRedeem + "&broadcaster_id=" + twitchBroadcasterId + "&reward_id=" + redemptionId;
+async function refundChannelPoints(requestContext = null) {
+  var requestRedemptionId = requestContext ? requestContext.redemptionId : latestRedeem;
+  var requestRewardId = requestContext ? requestContext.rewardId : redemptionId;
+  if (!requestRedemptionId || !requestRewardId) {
+    console.log("Unable to refund channel points because redemption id or reward id is missing.");
+    return false;
+  }
+
+  var url = "https://api.twitch.tv/helix/channel_points/custom_rewards/redemptions?id=" + requestRedemptionId + "&broadcaster_id=" + twitchBroadcasterId + "&reward_id=" + requestRewardId;
   const data = await fetch(url, {
     method: "PATCH",
     headers: {
@@ -319,7 +670,86 @@ async function refundChannelPoints() {
     return response;
   });
   console.log(data);
-  return data;
+  return data.status === 200;
+}
+
+async function handleSkipCommand(chatMessage) {
+  if (chatMessage.text.trim().toLowerCase() !== "!skip") {
+    return false;
+  }
+
+  var voterKey = getUserKey(chatMessage);
+  if (!skipVoteState) {
+    skipVoteState = {
+      voters: new Set(),
+      timeoutHandle: setTimeout(function () {
+        skipVoteState = null;
+      }, SKIP_TIMEOUT_MS),
+    };
+  }
+
+  if (skipVoteState.voters.has(voterKey)) {
+    return true;
+  }
+
+  skipVoteState.voters.add(voterKey);
+  if (skipVoteState.voters.size === 1) {
+    sendChatMessage("Skip vote started (1/" + REQUIRED_SKIP_VOTES + ").");
+  }
+
+  if (skipVoteState.voters.size >= REQUIRED_SKIP_VOTES) {
+    clearTimeout(skipVoteState.timeoutHandle);
+    skipVoteState = null;
+    var skipped = await spotifySkipToNext();
+    if (skipped) {
+      sendChatMessage(REQUIRED_SKIP_VOTES + "/" + REQUIRED_SKIP_VOTES + " skip votes. Skipped current song.");
+    } else {
+      sendChatMessage(REQUIRED_SKIP_VOTES + "/" + REQUIRED_SKIP_VOTES + " skip votes, but Spotify did not skip.");
+    }
+  }
+
+  return true;
+}
+
+function findRecentRedemption(chatMessage) {
+  var userKey = getUserKey(chatMessage);
+  var now = Date.now();
+  recentRedemptions = recentRedemptions.filter(function (redemption) {
+    return now - redemption.createdAt < 1000 * 60;
+  });
+
+  var redemptionIndex = recentRedemptions.findIndex(function (redemption) {
+    var sameUser = redemption.userKey === userKey || redemption.displayNameKey === chatMessage.displayName.toLowerCase() || redemption.loginKey === chatMessage.login.toLowerCase();
+    return sameUser && redemption.text === chatMessage.text;
+  });
+  if (redemptionIndex === -1) {
+    return null;
+  }
+
+  return recentRedemptions.splice(redemptionIndex, 1)[0];
+}
+
+async function waitForRecentRedemption(chatMessage) {
+  var startedAt = Date.now();
+  var recentRedemption = findRecentRedemption(chatMessage);
+  while (!recentRedemption && Date.now() - startedAt < REDEMPTION_MATCH_TIMEOUT_MS) {
+    await sleepTime(REDEMPTION_MATCH_INTERVAL_MS);
+    recentRedemption = findRecentRedemption(chatMessage);
+  }
+  return recentRedemption;
+}
+
+async function createRequestContext(chatMessage) {
+  var recentRedemption = await waitForRecentRedemption(chatMessage);
+  return {
+    userKey: getUserKey(chatMessage),
+    userId: chatMessage.userId,
+    displayName: chatMessage.displayName,
+    login: chatMessage.login,
+    messageId: chatMessage.messageId,
+    rewardId: chatMessage.customRewardId || (recentRedemption && recentRedemption.rewardId) || "",
+    redemptionId: recentRedemption ? recentRedemption.redemptionId : "",
+  };
 }
 
 function connectChatBot() {
@@ -330,30 +760,47 @@ function connectChatBot() {
   wsChatBot.onopen = function (event) {
     console.log(event);
     console.log("wsChatBot Socket Opened");
-    wsChatBot.send("CAP REQ : twitch.tv/tags twitch.tv/commands");
+    wsChatBot.send("CAP REQ :twitch.tv/tags twitch.tv/commands");
     wsChatBot.send("PASS oauth:" + getTwitchBotAccessToken(true));
     wsChatBot.send("NICK " + twitchBotName);
-    wsChatBot.send("JOIN #vaarattu");
+    wsChatBot.send("JOIN " + getChatChannel());
   };
 
   wsChatBot.onmessage = async function (event) {
-    message = event.data;
-    // TODO JOS EPÄONNISTUU KOITA REFRESH TOKEN
     console.log(event);
-    console.log(message);
-    if (message.includes("custom-reward-id")) {
-      console.log("wsChatBot.onmessage: " + message);
-      var split = message.split(";");
-      latestMsgIndex = split.findIndex((item) => item.startsWith("id="));
-      latestMsg = split[latestMsgIndex].split("=")[1];
-      customRewardIdIndex = split.findIndex((item) => item.startsWith("custom-reward-id="));
-      redeemId = split[customRewardIdIndex].split("=")[1];
-      if (redeemId === twitchChannelRedeemId) {
-        chatMessageTextIndex = split.findIndex((item) => item.includes("PRIVMSG"));
-        chatMessageTextSplit = split[chatMessageTextIndex].split(":");
-        chatMessageText = chatMessageTextSplit[chatMessageTextSplit.length - 1];
-        var response = await parseSongRequest(chatMessageText);
-        wsChatBot.send("@reply-parent-msg-id=" + latestMsg + " PRIVMSG #vaarattu :" + response);
+    console.log(event.data);
+
+    var rawMessages = event.data.split("\r\n").filter(function (rawMessage) {
+      return rawMessage !== "";
+    });
+
+    for (var i = 0; i < rawMessages.length; i++) {
+      var rawMessage = rawMessages[i];
+      if (rawMessage.startsWith("PING")) {
+        wsChatBot.send("PONG :tmi.twitch.tv");
+        continue;
+      }
+
+      var chatMessage = parseTwitchPrivmsg(rawMessage);
+      if (!chatMessage) {
+        continue;
+      }
+
+      var handledSkip = await handleSkipCommand(chatMessage);
+      if (handledSkip) {
+        continue;
+      }
+
+      var handledChoice = await handlePendingSongChoice(chatMessage);
+      if (handledChoice) {
+        continue;
+      }
+
+      if (chatMessage.customRewardId === twitchChannelRedeemId) {
+        console.log("wsChatBot.onmessage: " + rawMessage);
+        var requestContext = await createRequestContext(chatMessage);
+        var response = await parseSongRequest(chatMessage.text, requestContext);
+        sendChatMessage(response, chatMessage.messageId);
       }
     }
   };
@@ -383,14 +830,14 @@ function nonce(length) {
 }
 
 function heartbeat(ws) {
-  message = {
+  var message = {
     type: "PING",
   };
   ws.send(JSON.stringify(message));
 }
 
 function listen(ws, topic) {
-  message = {
+  var message = {
     type: "LISTEN",
     nonce: nonce(15),
     data: {
@@ -412,29 +859,42 @@ async function connectChannelPoints() {
     console.log(event);
     console.log("wsChannelPoints Socket Opened");
     heartbeat(wsChannelPoints);
-    heartbeatHandle = setInterval(heartbeat(wsChannelPoints), heartbeatInterval);
+    heartbeatHandle = setInterval(function () {
+      heartbeat(wsChannelPoints);
+    }, heartbeatInterval);
     console.log("Listening on channel id: " + twitchBroadcasterId);
     listen(wsChannelPoints, "channel-points-channel-v1." + twitchBroadcasterId);
   };
 
   wsChannelPoints.onmessage = async function (event) {
-    message = JSON.parse(event.data);
+    var message = JSON.parse(event.data);
     console.log("wsChannelPoints.onmessage: " + message["type"]);
     console.log(message);
 
     if (message.type == "RECONNECT") {
       console.log("Reconnecting...");
-      setTimeout(connect, reconnectInterval);
+      wsChannelPoints.close();
+      return;
     }
     if (message["type"] == "MESSAGE") {
       var messageData = JSON.parse(message["data"]["message"]);
       console.log(messageData);
       var rewardId = messageData["data"]["redemption"]["reward"]["id"];
       if (rewardId == twitchChannelRedeemId) {
-        redemptionId = messageData["data"]["redemption"]["reward"]["id"];
-        latestRedeem = messageData["data"]["redemption"]["id"];
-        twitchName = messageData["data"]["redemption"]["user"]["display_name"];
-        rewardInput = messageData["data"]["redemption"]["user_input"];
+        var redemption = messageData["data"]["redemption"];
+        redemptionId = redemption["reward"]["id"];
+        latestRedeem = redemption["id"];
+        var twitchName = redemption["user"]["display_name"];
+        var rewardInput = redemption["user_input"];
+        recentRedemptions.push({
+          userKey: redemption["user"]["id"] || twitchName.toLowerCase(),
+          displayNameKey: twitchName.toLowerCase(),
+          loginKey: redemption["user"]["login"] ? redemption["user"]["login"].toLowerCase() : "",
+          rewardId: redemption["reward"]["id"],
+          redemptionId: redemption["id"],
+          text: rewardInput,
+          createdAt: Date.now(),
+        });
         //var response = await parseSongRequest(rewardInput);
         //wsChatBot.send("@reply-parent-msg-id=" + latestMsg + " PRIVMSG #vaarattu :" + response);
       }
@@ -453,7 +913,7 @@ async function start() {
   await checkTwitchAuth(true);
   await checkTwitchAuth(false);
   await checkSpotifyAuth();
-  //connectChannelPoints();
+  connectChannelPoints();
   connectChatBot();
 }
 

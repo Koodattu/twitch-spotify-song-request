@@ -209,7 +209,7 @@ def callback():
     data = {
         "grant_type": "authorization_code",
         "code": code,
-        "redirect_uri": "http://localhost:5000/spotify/callback",
+        "redirect_uri": "http://127.0.0.1:5000/spotify/callback",
     }
 
     response = requests.post(token_url, headers=headers, data=data)
@@ -347,7 +347,7 @@ def generate_spotify_auth_url(clientId):
         "response_type": "code",
         "client_id": clientId,
         "scope": "user-modify-playback-state",
-        "redirect_uri": "http://localhost:5000/spotify/callback",
+        "redirect_uri": "http://127.0.0.1:5000/spotify/callback",
     }
     url = "https://accounts.spotify.com/authorize?" + urlencode(params)
     return url
